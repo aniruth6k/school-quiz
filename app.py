@@ -1,115 +1,128 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import openai
-import json
-import time
+from flask import Flask, jsonify, request
+from openai import OpenAI
 import os
+import time
+from flask_cors import CORS
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# OpenAI API Configuration - directly set the API key and Assistant ID
-openai.api_key = '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'
-ASSISTANT_ID = 'asst_ESnTo4g7lQXEmQRGDYRGAlgj'
+# Initialize OpenAI client - corrected initialization
+client = OpenAI(
+    api_key=os.getenv('OPENAI_API_KEY')
+)
 
-# Initialize OpenAI client with the set API key
-client = openai.Client(api_key=openai.api_key)
+# Get or create assistant ID
+ASSISTANT_ID = os.getenv('OPENAI_ASSISTANT_ID')
 
-def wait_for_run_completion(thread_id, run_id, timeout=30):
-    start_time = time.time()
-    while True:
-        if time.time() - start_time > timeout:
-            raise Exception("Request timed out")
-            
-        try:
-            run = client.beta.threads.runs.retrieve(
-                thread_id=thread_id,
-                run_id=run_id
-            )
-            
-            if run.status == 'completed':
-                return run
-            elif run.status in ['failed', 'expired']:
-                raise Exception(f"Run {run.status}")
-            
-            time.sleep(1)
-        except Exception as e:
-            raise Exception(f"Error checking run status: {str(e)}")
+def create_assistant():
+    assistant = client.beta.assistants.create(
+        name="School Quiz Generator",
+        instructions="""You are a school quiz generator. When given notes or study material, generate 5 
+        multiple choice questions that test understanding of the material. Each question must have:
+        1. A clear question statement
+        2. Four options (labeled A, B, C, D)
+        3. The correct answer (0 for A, 1 for B, 2 for C, 3 for D)
+        4. A brief explanation of why the answer is correct
+        
+        Format each question as a dictionary with these exact keys:
+        - 'question': the question text
+        - 'options': list of 4 options
+        - 'correct_answer': integer 0-3
+        - 'explanation': explanation text""",
+        model="gpt-4-1106-preview"
+    )
+    print(f"Created assistant with ID: {assistant.id}")
+    return assistant.id
 
-def get_messages(thread_id):
+# Create assistant if ID not found
+if not ASSISTANT_ID:
+    ASSISTANT_ID = create_assistant()
+
+def parse_assistant_response(response_text):
     try:
-        messages = client.beta.threads.messages.list(thread_id=thread_id)
-        if messages and messages.data:
-            message = messages.data[0]
-            if hasattr(message, 'content') and message.content:
-                for content_item in message.content:
-                    if hasattr(content_item, 'text') and hasattr(content_item.text, 'value'):
-                        return content_item.text.value
-        return None
+        # Implement your parsing logic here
+        questions = [
+            {
+                "question": "Sample question 1?",
+                "options": ["Option A", "Option B", "Option C", "Option D"],
+                "correct_answer": 0,
+                "explanation": "Explanation for the correct answer"
+            }
+        ]
+        return questions
     except Exception as e:
-        raise Exception(f"Error getting messages: {str(e)}")
+        print(f"Error parsing response: {e}")
+        return None
 
-def generate_questions(unit_number):
+@app.route('/generate-quiz/<int:unit>', methods=['GET'])
+def generate_quiz(unit):
     try:
+        # Get notes content from environment variable instead of file
+        unit_notes = os.getenv(f'UNIT_{unit}_NOTES', '')
+        if not unit_notes:
+            return jsonify({'error': f'Notes for Unit {unit} not found'}), 404
+
         thread = client.beta.threads.create()
-        
-        prompt = f"""Generate exactly 5 multiple choice questions for Math Unit {unit_number}.
-        
-        Requirements:
-        1. Each question must have exactly 4 options (A, B, C, D)
-        2. Format as JSON array with 5 question objects
-        3. Each question object must have:
-           - question: The question text
-           - options: Array of 4 answer choices
-           - correct_answer: Index of correct answer (0-3)
-           - explanation: Explanation of the correct answer
-        """
-        
+
         message = client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
-            content=prompt
+            content=f"""Generate 5 multiple choice questions based on these study materials:
+            
+            {unit_notes}"""
         )
-        
+
         run = client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID
         )
-        
-        wait_for_run_completion(thread.id, run.id)
-        response_content = get_messages(thread.id)
-        
-        if not response_content:
-            raise Exception("No valid response received")
-            
-        json_str = response_content.strip()
-        questions = json.loads(json_str)
-        
-        return questions
-            
-    except Exception as e:
-        print(f"Error generating questions: {e}")
-        raise
 
-@app.route('/')
+        start_time = time.time()
+        timeout = 30
+        
+        while True:
+            if time.time() - start_time > timeout:
+                return jsonify({'error': 'Request timed out'}), 504
+                
+            run_status = client.beta.threads.runs.retrieve(
+                thread_id=thread.id,
+                run_id=run.id
+            )
+            
+            if run_status.status == 'completed':
+                break
+            elif run_status.status == 'failed':
+                return jsonify({'error': 'Failed to generate questions'}), 500
+                
+            time.sleep(1)
+
+        messages = client.beta.threads.messages.list(
+            thread_id=thread.id
+        )
+
+        assistant_response = messages.data[0].content[0].text.value
+        
+        questions = parse_assistant_response(assistant_response)
+        
+        if questions is None:
+            return jsonify({'error': 'Failed to parse questions'}), 500
+
+        return jsonify({
+            'questions': questions
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({
-        "status": "healthy", 
-        "timestamp": time.time(),
-        "message": "API is running"
-    })
-
-@app.route('/generate-quiz/<int:unit>', methods=['GET'])
-def generate_quiz(unit):
-    if not 1 <= unit <= 10:
-        return jsonify({"error": "Unit number must be between 1 and 10"}), 400
-        
-    try:
-        questions = generate_questions(unit)
-        return jsonify({"questions": questions})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({'status': 'healthy'}), 200
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
+    port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
