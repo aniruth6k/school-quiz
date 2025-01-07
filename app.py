@@ -8,11 +8,12 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-# OpenAI API Configuration
-API_KEY = os.getenv('OPENAI_API_KEY')
-ASSISTANT_ID = os.getenv('ASSISTANT_ID')
+# OpenAI API Configuration - directly set the API key and Assistant ID
+openai.api_key = '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'
+ASSISTANT_ID = 'asst_ESnTo4g7lQXEmQRGDYRGAlgj'
 
-client = openai.OpenAI(api_key=API_KEY)
+# Initialize OpenAI client with the set API key
+client = openai.Client(api_key=openai.api_key)
 
 def wait_for_run_completion(thread_id, run_id, timeout=30):
     start_time = time.time()
@@ -20,27 +21,33 @@ def wait_for_run_completion(thread_id, run_id, timeout=30):
         if time.time() - start_time > timeout:
             raise Exception("Request timed out")
             
-        run = client.beta.threads.runs.retrieve(
-            thread_id=thread_id,
-            run_id=run_id
-        )
-        
-        if run.status == 'completed':
-            return run
-        elif run.status in ['failed', 'expired']:
-            raise Exception(f"Run {run.status}")
-        
-        time.sleep(1)
+        try:
+            run = client.beta.threads.runs.retrieve(
+                thread_id=thread_id,
+                run_id=run_id
+            )
+            
+            if run.status == 'completed':
+                return run
+            elif run.status in ['failed', 'expired']:
+                raise Exception(f"Run {run.status}")
+            
+            time.sleep(1)
+        except Exception as e:
+            raise Exception(f"Error checking run status: {str(e)}")
 
 def get_messages(thread_id):
-    messages = client.beta.threads.messages.list(thread_id=thread_id)
-    if messages and messages.data:
-        message = messages.data[0]
-        if hasattr(message, 'content') and message.content:
-            for content_item in message.content:
-                if hasattr(content_item, 'text') and hasattr(content_item.text, 'value'):
-                    return content_item.text.value
-    return None
+    try:
+        messages = client.beta.threads.messages.list(thread_id=thread_id)
+        if messages and messages.data:
+            message = messages.data[0]
+            if hasattr(message, 'content') and message.content:
+                for content_item in message.content:
+                    if hasattr(content_item, 'text') and hasattr(content_item.text, 'value'):
+                        return content_item.text.value
+        return None
+    except Exception as e:
+        raise Exception(f"Error getting messages: {str(e)}")
 
 def generate_questions(unit_number):
     try:
@@ -86,7 +93,11 @@ def generate_questions(unit_number):
 
 @app.route('/')
 def health_check():
-    return jsonify({"status": "healthy", "timestamp": time.time()})
+    return jsonify({
+        "status": "healthy", 
+        "timestamp": time.time(),
+        "message": "API is running"
+    })
 
 @app.route('/generate-quiz/<int:unit>', methods=['GET'])
 def generate_quiz(unit):
