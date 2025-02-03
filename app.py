@@ -237,4 +237,4 @@ if _name_ == '_main_':
     print("\nStarting Quiz Generator Server...")
     print("=" * 50)
     CORS(app, resources={r"/": {"origins": ""}})
-    app.run(debug=True, port=5000, host='0.0.0.0')
+    app.run(debug=True)
