@@ -11,7 +11,7 @@ from urllib.parse import unquote
 from threading import Thread
 import re
 
-app = Flask(__name__)
+app = Flask(_name_)
 CORS(app)
 load_dotenv()
 
@@ -196,7 +196,7 @@ def get_next_questions():
 
         if len(question_cache) < 5:
             if standard and subject and chapter:
-                file_path = f"D:/bck/schoolbooks/{standard}th/{subject}/Chapter {chapter}.txt"
+                file_path = f"/home/ubuntu/schoolbookstxt/{standard}/{subject}/{topic}.txt"
                 if os.path.exists(file_path):
                     chapter_content = read_chapter_content(file_path)
                     questions = generate_quiz_questions(text_content=chapter_content, is_practice_mode=is_practice_mode)
@@ -233,8 +233,8 @@ def clear_cache():
     used_questions.clear()
     return jsonify({"status": "Cache cleared"}), 200
 
-if __name__ == '__main__':
+if _name_ == '_main_':
     print("\nStarting Quiz Generator Server...")
     print("=" * 50)
     CORS(app, resources={r"/": {"origins": ""}})
-    app.run(debug=True)
+    app.run(debug=True, port=5000, host='0.0.0.0')
