@@ -147,7 +147,7 @@ def preload_questions(standard: str, subject: str, chapter: str, topic: str, is_
         used_questions.clear()
         current_topic = topic
     
-    file_path = rf"D:\bck\schoolbooks\{standard}\{subject}\{topic}.txt"
+    file_path = f"/home/ubuntu/schoolbooks/{standard}/{subject}/{topic}.txt"
     
     print(f"\nPreloading questions for {subject} Chapter {topic} (Standard {standard})")
     print("=" * 50)
