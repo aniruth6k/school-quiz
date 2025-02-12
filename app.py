@@ -1,22 +1,32 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from openai import OpenAI
+from google.generativeai import GenerativeModel
+import google.generativeai as genai
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict
 import os
 import random
 import json
 from urllib.parse import unquote
 from threading import Thread
 import re
+import asyncio
+from functools import wraps
 
-app = Flask(_name_)
+app = Flask(__name__)
 CORS(app)
 load_dotenv()
 
-api_key = os.getenv('OPENAI_API_KEY')
-client = OpenAI(api_key=api_key)
+# Configuration
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+genai.configure(api_key=GEMINI_API_KEY)
+model = GenerativeModel('gemini-2.0-flash-exp')
+
+# Constants
+TEST_MODE_QUESTIONS = 25
+PRACTICE_MODE_QUESTIONS_PER_SET = 5
+HARD_QUESTION_PERCENTAGE = 70
 
 class QuizQuestion(BaseModel):
     question: str
@@ -28,6 +38,26 @@ class QuizQuestion(BaseModel):
 question_cache: List[QuizQuestion] = []
 used_questions: Set[str] = set()
 current_topic: str = ""
+file_content_cache: Dict[str, str] = {}
+concept_cache: Dict[str, str] = {}
+processed_files: Set[str] = set()
+
+def async_to_sync(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        return asyncio.run(f(*args, **kwargs))
+    return wrapper
+
+def extract_key_concepts(text_content: str) -> str:
+    print("\nExtracting key concepts from text content...")
+    prompt = """Extract and summarize the key concepts and important points from this text. 
+    Include only the most essential information needed for generating questions later.
+    Keep it concise but comprehensive."""
+    
+    response = model.generate_content(f"{prompt}\n\nText: {text_content}")
+    concepts = response.text.strip()
+    print("Successfully extracted key concepts")
+    return concepts
 
 def print_question(q: QuizQuestion, index: int):
     print(f"\nQuestion {index}:")
@@ -40,15 +70,21 @@ def print_question(q: QuizQuestion, index: int):
     print(f"Explanation: {q.explanation}")
     print("-" * 50)
 
-def read_chapter_content(file_path: str) -> str:
+def read_and_process_content(file_path: str) -> Optional[str]:
     try:
+        print(f"\nReading and processing file: {file_path}")
         with open(file_path, 'r', encoding='utf-8') as file:
-            return file.read()
+            content = file.read()
+            key_concepts = extract_key_concepts(content)
+            concept_cache[file_path] = key_concepts
+            file_content_cache[file_path] = content
+            print("Successfully processed file and extracted concepts")
+            return content
     except Exception as e:
-        print(f"Error reading file: {str(e)}")
+        print(f"Error processing file {file_path}: {str(e)}")
         return None
 
-def calculate_accuracy(text_content: str, questions: list) -> float:
+def calculate_accuracy(text_content: str, questions: List[QuizQuestion]) -> float:
     try:
         total_words = len(text_content.split())
         relevant_count = 0
@@ -63,163 +99,244 @@ def calculate_accuracy(text_content: str, questions: list) -> float:
         print(f"Error calculating accuracy: {str(e)}")
         return 0.0
 
-def generate_quiz_questions(text_content: str = None, topic: str = None, is_practice_mode: bool = False) -> Optional[List[QuizQuestion]]:
+async def generate_quiz_questions(text_content: str = None, topic: str = None, concepts: str = None, is_practice_mode: bool = True) -> Optional[List[QuizQuestion]]:
     print("\nGenerating Questions...")
     print("=" * 50)
-
-    system_prompt = """Generate thought-provoking multiple choice questions that enhance students' cognitive abilities and IQ. Include questions that:
-    1. Test logical reasoning and pattern recognition
-    2. Require application of concepts in novel situations
-    3. Involve analysis and problem-solving
-    4. Encourage creative thinking and innovation
-    5. Integrate multiple concepts and ideas
-    
-    The response must be a JSON object with the following structure:
-    {
-        "questions": [
-            {
-                "question": "Question text",
-                "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
-                "answer": "Correct option text",
-                "explanation": "Brief explanation under 50 words"
-            }
-        ]
-    }"""
-
-    num_questions = 5
-
-    if text_content:
-        user_prompt = f"Content:\n{text_content}\n\nCreate {num_questions} questions in the specified JSON format."
-    else:
-        user_prompt = f"Create {num_questions} questions about {topic} in the specified JSON format."
+    print(f"Mode: {'Practice' if is_practice_mode else 'Test'}")
+    print(f"Source: {'Text File' if text_content else 'Concepts' if concepts else 'Topic only'}")
 
     try:
-        completion = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.7,
-            response_format={"type": "json_object"}
-        )
+        num_questions = TEST_MODE_QUESTIONS if not is_practice_mode else PRACTICE_MODE_QUESTIONS_PER_SET
 
-        response_text = completion.choices[0].message.content
-        response_data = json.loads(response_text)
+        if not is_practice_mode:
+            enhanced_prompt = """Generate extremely challenging multiple choice questions that test advanced cognitive abilities. Questions should be:
+
+            Question Distribution:
+            1. Complex logical reasoning (40%)
+               - Multi-step deductive reasoning
+               - Advanced pattern recognition
+               - Abstract concept application
+            
+            2. Advanced critical thinking (60%)
+               - Deep analysis requirements
+               - Complex problem evaluation
+               - Multi-perspective consideration
+            
+            3. Multi-step problem solving (60%)
+               - Sophisticated computational thinking
+               - Strategic solution planning
+               - Advanced concept integration
+
+            Requirements:
+            - All questions must be at the highest difficulty level
+            - Questions should challenge even advanced learners
+            - Clear and unambiguous despite complexity
+            - Each question should require deep understanding
+            - Include detailed explanations for learning
+
+            Format Requirements:
+            - 4 distinct options per question
+            - One definitively correct answer
+            - Comprehensive explanation (40 words)
+            - Crystal clear question structure
+
+            Response Format (JSON):
+            {
+                "questions": [
+                    {
+                        "question": "Question text",
+                        "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+                        "answer": "Correct option text",
+                        "explanation": "Detailed explanation"
+                    }
+                ]
+            }"""
+        else:
+            enhanced_prompt = """Generate a balanced mix of multiple choice questions with varying difficulty levels:
+
+            Question Distribution:
+            1. Hard questions (100%)
+               - Complex reasoning
+               - Advanced problem-solving
+               - Deep conceptual understanding
+            
+            2. Intermediate questions (100%)
+               - Applied knowledge
+               - Basic analysis
+               - Concept integration
+            
+            3. Basic questions (1000%)
+               - Fundamental concepts
+               - Direct application
+               - Core understanding
+
+            Requirements:
+            - Progressive difficulty level
+            - Clear learning progression
+            - Balanced concept coverage
+            - Appropriate challenge level
+            - Helpful explanations for learning
+
+            Format Requirements:
+            - 4 distinct options per question
+            - One definitively correct answer
+            - Clear explanation (40 words)
+            - Well-structured questions
+
+            Response Format (JSON):
+            {
+                "questions": [
+                    {
+                        "question": "Question text",
+                        "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+                        "answer": "Correct option text",
+                        "explanation": "Detailed explanation"
+                    }
+                ]
+            }"""
+
+        if text_content:
+            content_prompt = f"Using this content:\n{text_content}\n\nGenerate {num_questions} questions that follow the guidelines above."
+            print("Using full text content for generation")
+        elif concepts:
+            content_prompt = f"""Generate {num_questions} questions about {topic} using these key concepts:
+            {concepts}
+            
+            Ensure questions are based on these concepts while maintaining variety and appropriate difficulty."""
+            print("Using extracted concepts for generation")
+        else:
+            content_prompt = f"Generate {num_questions} questions about {topic} that follow the guidelines above."
+            print("Using topic only for generation")
+
+        full_prompt = f"{enhanced_prompt}\n\n{content_prompt}"
+
+        response = model.generate_content(full_prompt)
+        response_text = response.text.strip()
+        
+        json_text = re.search(r'({[\s\S]*})', response_text)
+        if not json_text:
+            raise ValueError("No valid JSON found in response")
+            
+        cleaned_json = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', json_text.group(1))
+        cleaned_json = re.sub(r',(\s*[}\]])', r'\1', cleaned_json)
+        
+        try:
+            response_data = json.loads(cleaned_json)
+        except json.JSONDecodeError as e:
+            print(f"JSON Parse Error: {str(e)}")
+            print(f"Problematic JSON: {cleaned_json}")
+            raise
         
         processed_questions = []
-        for q in response_data["questions"]:
+        for q in response_data.get("questions", []):
             if not all(k in q for k in ["question", "options", "answer", "explanation"]):
                 continue
+                
             if len(q["options"]) != 4:
                 continue
+                
             if q["question"] in used_questions:
                 continue
 
-            question = QuizQuestion(
-                question=q["question"],
-                options=q["options"],
-                answer=q["answer"],
-                explanation=q["explanation"]
-            )
+            cleaned_question = {
+                "question": q["question"].strip(),
+                "options": [opt.strip() for opt in q["options"]],
+                "answer": q["answer"].strip(),
+                "explanation": q["explanation"].strip()
+            }
 
-            if question.answer not in question.options:
+            try:
+                question = QuizQuestion(**cleaned_question)
+
+                if question.answer not in question.options:
+                    continue
+
+                random.shuffle(question.options)
+                used_questions.add(question.question)
+                processed_questions.append(question)
+                print_question(question, len(processed_questions))
+            except Exception as e:
+                print(f"Error creating question object: {str(e)}")
                 continue
 
-            random.shuffle(question.options)
-            used_questions.add(question.question)
-            processed_questions.append(question)
-
-        for i, q in enumerate(processed_questions, 1):
-            print_question(q, i)
-
+        print(f"\nSuccessfully processed {len(processed_questions)} questions")
         return processed_questions
 
     except Exception as e:
         print(f"Error in generate_quiz_questions: {str(e)}")
         return None
 
-def preload_questions(standard: str, subject: str, chapter: str, topic: str, is_practice_mode: bool = False):
-    global question_cache, current_topic, used_questions
-    
-    if topic != current_topic:
-        question_cache.clear()
-        used_questions.clear()
-        current_topic = topic
-    
-    file_path = f"/home/ubuntu/schoolbookstxt/{standard}/{subject}/{topic}.txt"
-    
-    print(f"\nPreloading questions for {subject} Chapter {topic} (Standard {standard})")
-    print("=" * 50)
-    
-    if os.path.exists(file_path):
-        chapter_content = read_chapter_content(file_path)
-        if chapter_content:
-            questions = generate_quiz_questions(text_content=chapter_content, is_practice_mode=is_practice_mode)
-            if questions:
-                accuracy = calculate_accuracy(chapter_content, questions)
-                print(f"\nQuestion Generation Accuracy: {accuracy}%")
-                print("=" * 50)
-                question_cache.extend(questions)
-    else:
-        print(f"\nFile not found: {file_path}")
-        print("Generating questions based on topic instead...")
-        questions = generate_quiz_questions(topic=topic, is_practice_mode=is_practice_mode)
-        if questions:
-            question_cache.extend(questions)
-
 @app.route('/quiz/next', methods=['GET'])
-def get_next_questions():
+@async_to_sync
+async def get_next_questions():
     try:
         topic = unquote(request.args.get('topic', ''))
         current_index = int(request.args.get('current_index', 0))
         standard = request.args.get('standard', '')
         subject = request.args.get('subject', '')
         chapter = request.args.get('chapter', '')
-        is_practice_mode = request.args.get('is_practice_mode', 'false').lower() == 'true'
+        is_practice_mode = request.args.get('is_practice_mode', 'true').lower() == 'true'
         
         if not topic:
             return jsonify({"error": "Missing topic parameter"}), 400
 
         topic = topic.strip()
-        max_questions = 50 if is_practice_mode else 20
         
-        if current_index >= max_questions:
+        if not is_practice_mode and current_index >= TEST_MODE_QUESTIONS:
             return jsonify({
                 "questions": [],
                 "should_fetch": False,
-                "total_questions": max_questions
+                "total_questions": TEST_MODE_QUESTIONS
             })
-        
-        if current_index % 5 == 2 or len(question_cache) < 5:
-            Thread(target=preload_questions, args=(standard, subject, chapter, topic, is_practice_mode)).start()
 
-        if len(question_cache) < 5:
-            if standard and subject and chapter:
-                file_path = f"/home/ubuntu/schoolbookstxt/{standard}/{subject}/{topic}.txt"
-                if os.path.exists(file_path):
-                    chapter_content = read_chapter_content(file_path)
-                    questions = generate_quiz_questions(text_content=chapter_content, is_practice_mode=is_practice_mode)
+        questions_per_set = PRACTICE_MODE_QUESTIONS_PER_SET if is_practice_mode else TEST_MODE_QUESTIONS
+
+        if len(question_cache) < questions_per_set:
+            file_path = rf"/home/ubuntu/schoolbookstxt/{standard}/{subject}/{topic}.txt"
+            
+            if os.path.exists(file_path):
+                if file_path not in processed_files:
+                    print("\nProcessing new file content...")
+                    chapter_content = read_and_process_content(file_path)
+                    processed_files.add(file_path)
+                    questions = await generate_quiz_questions(
+                        text_content=chapter_content,
+                        is_practice_mode=is_practice_mode
+                    )
                 else:
-                    questions = generate_quiz_questions(topic=topic, is_practice_mode=is_practice_mode)
+                    print("\nUsing cached concepts...")
+                    concepts = concept_cache.get(file_path)
+                    questions = await generate_quiz_questions(
+                        topic=topic,
+                        concepts=concepts,
+                        is_practice_mode=is_practice_mode
+                    )
             else:
-                questions = generate_quiz_questions(topic=topic, is_practice_mode=is_practice_mode)
+                print("\nGenerating questions from topic only...")
+                questions = await generate_quiz_questions(
+                    topic=topic,
+                    is_practice_mode=is_practice_mode
+                )
                 
-            if questions is None:
+            if questions is None or len(questions) == 0:
                 return jsonify({"error": "Failed to generate questions"}), 500
-        else:
-            questions = question_cache[:5]
-            del question_cache[:5]
+                
+            question_cache.extend(questions)
+
+        questions_to_send = question_cache[:questions_per_set]
+        del question_cache[:questions_per_set]
+
+        if not questions_to_send:
+            return jsonify({"error": "No questions available"}), 500
 
         return jsonify({
-            "questions": [q.model_dump() for q in questions],
-            "should_fetch": True,
-            "total_questions": max_questions
+            "questions": [q.model_dump() for q in questions_to_send],
+            "should_fetch": True if is_practice_mode else current_index + len(questions_to_send) < TEST_MODE_QUESTIONS,
+            "total_questions": TEST_MODE_QUESTIONS if not is_practice_mode else -1
         })
 
-    except ValueError as ve:
-        return jsonify({"error": str(ve)}), 400
     except Exception as e:
+        print(f"Error in get_next_questions: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
@@ -228,13 +345,32 @@ def health_check():
 
 @app.route('/quiz/clear-cache', methods=['GET'])
 def clear_cache():
-    global question_cache, used_questions
+    global question_cache, used_questions, file_content_cache, concept_cache, processed_files
     question_cache.clear()
     used_questions.clear()
-    return jsonify({"status": "Cache cleared"}), 200
+    file_content_cache.clear()
+    concept_cache.clear()
+    processed_files.clear()
+    print("\nAll caches cleared")
+    return jsonify({"status": "Caches cleared"}), 200
 
-if _name_ == '_main_':
+@app.route('/quiz/status', methods=['GET'])
+def get_status():
+    return jsonify({
+        "cache_size": len(question_cache),
+        "used_questions": len(used_questions),
+        "file_cache_size": len(file_content_cache),
+        "concept_cache_size": len(concept_cache),
+        "processed_files": len(processed_files),
+        "current_topic": current_topic
+    }), 200
+
+if __name__ == '__main__':
     print("\nStarting Quiz Generator Server...")
+    print(f"Test Mode Questions: {TEST_MODE_QUESTIONS}")
+    print(f"Practice Mode Questions Per Set: {PRACTICE_MODE_QUESTIONS_PER_SET}")
+    print(f"Hard Question Percentage: {HARD_QUESTION_PERCENTAGE}%")
     print("=" * 50)
+    
     CORS(app, resources={r"/": {"origins": ""}})
     app.run(debug=True, port=5000, host='0.0.0.0')
